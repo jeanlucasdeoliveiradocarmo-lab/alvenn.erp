@@ -1,0 +1,58 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(data) {
+      return request.auth != null && data.clienteId == request.auth.uid;
+    }
+
+    function isValidLead(data) {
+      return data.clienteId is string
+             && data.nome is string
+             && data.nome.size() > 0
+             && data.nome.size() <= 120
+             && data.telefone is string
+             && data.telefone.size() <= 30
+             && data.email is string
+             && data.email.size() <= 254
+             && data.status in ['novo_lead', 'novo', 'atendimento', 'orcamento', 'fechado', 'perdido']
+             && data.valorOrcamentoCentavos is int
+             && data.valorOrcamentoCentavos >= 0
+             && data.moeda == 'BRL'
+             && data.tarefas is list
+             && data.tarefas.size() <= 100;
+    }
+
+    match /leads/{leadId}/tarefasAgendadas/{taskId} {
+      function ownsLead() {
+        return request.auth != null && get(/databases/$(database)/documents/leads/$(leadId)).data.clienteId == request.auth.uid;
+      }
+      allow read: if ownsLead();
+      allow create: if ownsLead()
+        && request.resource.data.keys().hasOnly(['tipo', 'dataExecucao', 'conteudoMensagem', 'status', 'criadoEm'])
+        && request.resource.data.tipo in ['whatsapp', 'email']
+        && request.resource.data.dataExecucao is timestamp
+        && request.resource.data.dataExecucao > request.time
+        && request.resource.data.conteudoMensagem is string
+        && request.resource.data.conteudoMensagem.size() > 0
+        && request.resource.data.conteudoMensagem.size() <= 5000
+        && request.resource.data.status == 'pendente'
+        && request.resource.data.criadoEm == request.time;
+      // Somente Admin SDK altera resultado ou remove tarefas.
+      allow update, delete: if false;
+    }
+
+    match /leads/{leadId} {
+      allow read: if isOwner(resource.data);
+
+      allow create: if isOwner(request.resource.data)
+                    && isValidLead(request.resource.data);
+
+      allow update: if isOwner(resource.data)
+                    && isOwner(request.resource.data)
+                    && isValidLead(request.resource.data);
+
+      allow delete: if isOwner(resource.data);
+    }
+  }
+}

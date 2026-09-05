@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* Paleta noturna preserva os gradientes e as cores de identidade. */
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="dark"] body { background: #0b1120; color: #e2e8f0; }
+html[data-theme="dark"] :is(.bg-white, [class*="bg-white/"]) { background-color: #162033; }
+html[data-theme="dark"] :is(.bg-slate-50, .bg-slate-100, [class*="bg-blue-50"]) { background-color: #101a2d; }
+html[data-theme="dark"] :is(.text-slate-500, .text-slate-600, .text-slate-700, .text-slate-800, .text-slate-900) { color: #cbd5e1; }
+html[data-theme="dark"] [class*="text-[#071a57]"] { color: #e2e8f0; }
+html[data-theme="dark"] :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-blue-100, .border-blue-200) { border-color: #34445f; }
+html[data-theme="dark"] :is(input, select, textarea) { background-color: #101a2d; color: #e2e8f0; }
+html[data-theme="dark"] :is(.text-blue-600, .text-rose-600) { color: #a5b4fc; }
+html[data-theme="dark"] button:hover { filter: brightness(1.12); }
+html[data-theme="dark"] .text-slate-950 { color: #f1f5f9; }
