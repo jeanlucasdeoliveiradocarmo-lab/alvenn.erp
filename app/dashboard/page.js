@@ -36,6 +36,8 @@ export default function DashboardPage() {
     setError,
     newLeadToast,
     dismissNewLeadToast,
+    fromCache,
+    retry,
   } = useLeads(user?.uid);
   const { notifications, dismissNotification, clearNotifications } =
     useTaskNotifications(leads);
@@ -198,7 +200,7 @@ export default function DashboardPage() {
     router.replace("/login");
   }
 
-  if (authLoading) {
+  if (authLoading || !user) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#f4f7ff] text-slate-500">
         Carregando Alvenn ERP...
@@ -232,6 +234,10 @@ export default function DashboardPage() {
 
         {error ? <p className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800" role="alert">{error}</p> : null}
 
+        {error ? <button type="button" onClick={retry} className="mb-4 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white">Tentar novamente</button> : null}
+        {!error && !loading && fromCache ? <p role="status" className="mb-4 text-sm text-slate-500">Aguardando confirmação do servidor. Os dados disponíveis podem estar em cache; confira sua conexão se isso persistir.</p> : null}
+        {!error && !loading && !fromCache && leads.length === 0 ? <p role="status" className="mb-4 text-sm text-slate-500">Nenhum lead vinculado à sua conta. Confira se o clienteId dos documentos corresponde ao ID do Cliente acima e se o projeto Firebase está correto.</p> : null}
+
         {activeTab === "leads" ? (
           <LeadsView
             activeFilter={activeFilter}
@@ -240,6 +246,8 @@ export default function DashboardPage() {
             filteredLeads={filteredLeads}
             leads={leads}
             loading={loading}
+            syncError={error}
+            fromCache={fromCache}
             onCreateLead={openCreateModal}
             onDeleteLead={handleDeleteLead}
             onEditLead={openEditModal}
