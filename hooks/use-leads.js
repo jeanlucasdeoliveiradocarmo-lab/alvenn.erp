@@ -5,10 +5,12 @@ import {
   collection,
   query,
   where,
+  orderBy,
   onSnapshot,
 } from "firebase/firestore";
 
 import { db } from "@/lib/firebase";
+
 import {
   getTimestampInMillis,
   parseCurrencyToCents,
@@ -43,58 +45,101 @@ function normalizeBudget(data) {
     return cents;
   }
 
-  return parseCurrencyToCents(data.valor ?? data.budget ?? 0);
+  const rawValue = data.valor ?? data.budget ?? 0;
+
+  return parseCurrencyToCents(rawValue);
 }
 
 export function normalizeLead(leadDocument) {
   const data = leadDocument.data() || {};
-
   const rawValue = Number(data.valor || data.budget || 0);
+  const value = Number.isFinite(rawValue) ? rawValue : 0;
 
   return {
     ...data,
     id: leadDocument.id,
 
-    nome: String(data.nome || data.name || "Sem nome").trim(),
-    email: String(data.email || "").trim().toLowerCase(),
-    telefone: String(data.telefone || data.phone || "").trim(),
-    mensagem: String(data.mensagem || data.message || ""),
-    origem: String(data.origem || "Landing Page"),
+    nome: String(
+      data.nome || data.name || "Sem nome",
+    ).trim(),
 
-    status: normalizeStatus(data.status),
-    valor: Number.isFinite(rawValue) ? rawValue : 0,
-    valorOrcamentoCentavos: normalizeBudget(data),
+    email: String(data.email || "")
+      .trim()
+      .toLowerCase(),
+
+    telefone: String(
+      data.telefone || data.phone || "",
+    ).trim(),
+
+    mensagem: String(
+      data.mensagem || data.message || "",
+    ),
+
+    origem: String(
+      data.origem || "Landing Page",
+    ),
+
+    status: normalizeStatus(
+      data.status || "Novo",
+    ),
+
+    valor: value,
+
+    valorOrcamentoCentavos:
+      normalizeBudget(data),
+
     moeda: data.moeda || "BRL",
 
     tarefas: Array.isArray(data.tarefas)
       ? data.tarefas.filter(
-          (task) => task && typeof task === "object",
+          (task) =>
+            task &&
+            typeof task === "object",
         )
       : [],
 
-    createdAt: data.createdAt || data.timestamp || null,
+    // Compatibilidade com registros antigos.
+    criadoEm:
+      data.criadoEm ||
+      data.createdAt ||
+      data.timestamp ||
+      null,
+
+    createdAt:
+      data.criadoEm ||
+      data.createdAt ||
+      data.timestamp ||
+      null,
   };
 }
 
 export function useLeads(clientId) {
   const [leads, setLeads] = useState([]);
-  const [loading, setLoading] = useState(Boolean(clientId));
+  const [loading, setLoading] = useState(
+    Boolean(clientId),
+  );
   const [error, setError] = useState("");
-  const [fromCache, setFromCache] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  const [newLeadToast, setNewLeadToast] = useState(null);
+  const [newLeadToast, setNewLeadToast] =
+    useState(null);
+  const [fromCache, setFromCache] =
+    useState(false);
+  const [retryCount, setRetryCount] =
+    useState(0);
 
   const initialSnapshotRef = useRef(true);
 
   useEffect(() => {
-    if (!newLeadToast) return;
+    if (!newLeadToast) {
+      return undefined;
+    }
 
-    const timeout = window.setTimeout(
-      () => setNewLeadToast(null),
-      5000,
-    );
+    const timeout = window.setTimeout(() => {
+      setNewLeadToast(null);
+    }, 5000);
 
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [newLeadToast]);
 
   useEffect(() => {
@@ -105,85 +150,216 @@ export function useLeads(clientId) {
 
     if (!clientId) {
       setLoading(false);
-      return;
+      return undefined;
     }
 
     initialSnapshotRef.current = true;
     setLoading(true);
 
-    const leadsQuery = query(
+    /*
+     * O filtro clienteId é necessário porque as regras
+     * do Firestore permitem que cada usuário consulte
+     * somente seus próprios leads.
+     */
+    const baseQuery = query(
       collection(db, "leads"),
       where("clienteId", "==", clientId),
     );
 
-    const unsubscribe = onSnapshot(
-      leadsQuery,
-      { includeMetadataChanges: true },
-
-      (snapshot) => {
-        const addedAfterInitialLoad =
-          !initialSnapshotRef.current
-            ? snapshot
-                .docChanges()
-                .filter((change) => change.type === "added")
-            : [];
-
-        // Ordenação local mantém documentos antigos sem createdAt.
-        const nextLeads = snapshot.docs
-          .map(normalizeLead)
-          .sort(
-            (a, b) =>
-              getTimestampInMillis(b.createdAt) -
-              getTimestampInMillis(a.createdAt),
-          );
-
-        setLeads(nextLeads);
-        setFromCache(snapshot.metadata.fromCache);
-        setLoading(false);
-        setError("");
-
-        if (addedAfterInitialLoad.length > 0) {
-          const newest = normalizeLead(
-            addedAfterInitialLoad[
-              addedAfterInitialLoad.length - 1
-            ].doc,
-          );
-
-          setNewLeadToast({
-            id: `${newest.id}:${Date.now()}`,
-            message: "Novo Lead recebido do site!",
-            leadName: newest.nome,
-          });
-        }
-
-        initialSnapshotRef.current = false;
-      },
-
-      (firestoreError) => {
-        console.error(
-          "[Alvenn ERP] Falha ao consultar leads",
-          {
-            code: firestoreError.code,
-            message: firestoreError.message,
-            projectId: db.app.options.projectId,
-            collection: "leads",
-            clienteId: clientId,
-          },
-          firestoreError,
-        );
-
-        setLeads([]);
-        setLoading(false);
-
-        setError(
-          firestoreError.code === "permission-denied"
-            ? "Sem permissão para ler leads. Confira as regras do Firestore e o clienteId dos documentos."
-            : `Falha ao sincronizar leads (${firestoreError.code || "desconhecido"}). Confira a conexão e tente novamente.`,
-        );
-      },
+    /*
+     * O ouvinte principal usa a ordenação solicitada:
+     * lead mais recente primeiro.
+     */
+    const orderedQuery = query(
+      baseQuery,
+      orderBy("criadoEm", "desc"),
     );
 
-    return () => unsubscribe();
+    let active = true;
+    let failed = false;
+    let orderedSnapshot = null;
+    let compatibilitySnapshot = null;
+    let seenIds = new Set();
+
+    function publish() {
+      if (
+        !active ||
+        failed ||
+        !orderedSnapshot ||
+        !compatibilitySnapshot
+      ) {
+        return;
+      }
+
+      const documents = new Map();
+
+      /*
+       * O Firestore não devolve documentos que não tenham
+       * o campo utilizado no orderBy. Por isso, o snapshot
+       * de compatibilidade inclui registros antigos sem
+       * criadoEm.
+       */
+      for (const documentSnapshot of
+        compatibilitySnapshot.docs) {
+        const data =
+          documentSnapshot.data() || {};
+
+        if (data.criadoEm == null) {
+          documents.set(
+            documentSnapshot.id,
+            normalizeLead(documentSnapshot),
+          );
+        }
+      }
+
+      for (const documentSnapshot of
+        orderedSnapshot.docs) {
+        documents.set(
+          documentSnapshot.id,
+          normalizeLead(documentSnapshot),
+        );
+      }
+
+      const nextLeads = [
+        ...documents.values(),
+      ].sort((leadA, leadB) => {
+        const dateDifference =
+          getTimestampInMillis(
+            leadB.criadoEm,
+          ) -
+          getTimestampInMillis(
+            leadA.criadoEm,
+          );
+
+        if (dateDifference !== 0) {
+          return dateDifference;
+        }
+
+        return leadA.id.localeCompare(
+          leadB.id,
+        );
+      });
+
+      const cached =
+        orderedSnapshot.metadata.fromCache ||
+        compatibilitySnapshot.metadata
+          .fromCache;
+
+      if (!initialSnapshotRef.current) {
+        const newestLead = nextLeads.find(
+          (lead) => !seenIds.has(lead.id),
+        );
+
+        if (newestLead) {
+          setNewLeadToast({
+            id: `${newestLead.id}:${Date.now()}`,
+            message:
+              "Novo Lead recebido do site!",
+            leadName: newestLead.nome,
+          });
+        }
+      }
+
+      seenIds = new Set(
+        nextLeads.map((lead) => lead.id),
+      );
+
+      if (!cached) {
+        initialSnapshotRef.current = false;
+      }
+
+      setLeads(nextLeads);
+      setFromCache(cached);
+      setLoading(false);
+      setError("");
+    }
+
+    function handleError(firestoreError) {
+      if (!active) {
+        return;
+      }
+
+      failed = true;
+
+      console.error(
+        "Erro ao escutar atualizações em tempo real:",
+        firestoreError,
+        {
+          projectId:
+            db.app.options.projectId,
+          collection: "leads",
+          clienteId: clientId,
+        },
+      );
+
+      setLeads([]);
+      setLoading(false);
+
+      if (
+        firestoreError.code ===
+        "permission-denied"
+      ) {
+        setError(
+          "Sem permissão para ler leads. Confira as regras e o clienteId dos documentos.",
+        );
+        return;
+      }
+
+      if (
+        firestoreError.code ===
+        "failed-precondition"
+      ) {
+        setError(
+          "A consulta exige o índice clienteId + criadoEm. Publique firestore.indexes.json e aguarde sua criação.",
+        );
+        return;
+      }
+
+      setError(
+        `Falha ao sincronizar leads (${
+          firestoreError.code ||
+          "desconhecido"
+        }). Confira a conexão e tente novamente.`,
+      );
+    }
+
+    const unsubscribe = onSnapshot(
+      orderedQuery,
+      {
+        includeMetadataChanges: true,
+      },
+      (snapshot) => {
+        orderedSnapshot = snapshot;
+        publish();
+      },
+      handleError,
+    );
+
+    /*
+     * Consulta adicional para registros antigos sem criadoEm.
+     * Ela pode ser removida depois que todos os documentos
+     * antigos forem migrados.
+     */
+    const unsubscribeLegacy = onSnapshot(
+      baseQuery,
+      {
+        includeMetadataChanges: true,
+      },
+      (snapshot) => {
+        compatibilitySnapshot = snapshot;
+        publish();
+      },
+      handleError,
+    );
+
+    /*
+     * Cleanup obrigatório dos dois listeners.
+     */
+    return () => {
+      active = false;
+      unsubscribe();
+      unsubscribeLegacy();
+    };
   }, [clientId, retryCount]);
 
   return {
@@ -192,8 +368,18 @@ export function useLeads(clientId) {
     error,
     setError,
     fromCache,
-    retry: () => setRetryCount((count) => count + 1),
+
+    retry: () => {
+      setRetryCount(
+        (currentCount) =>
+          currentCount + 1,
+      );
+    },
+
     newLeadToast,
-    dismissNewLeadToast: () => setNewLeadToast(null),
+
+    dismissNewLeadToast: () => {
+      setNewLeadToast(null);
+    },
   };
 }
