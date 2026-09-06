@@ -1,20 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  collection,
-  query,
-  where,
-  orderBy,
-  onSnapshot,
-} from "firebase/firestore";
-
+import { collection, onSnapshot } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-
-import {
-  getTimestampInMillis,
-  parseCurrencyToCents,
-} from "@/lib/crm";
+import { parseCurrencyToCents } from "@/lib/crm";
 
 const STATUS_ALIASES = {
   novo: "novo",
@@ -34,333 +23,152 @@ function normalizeStatus(value) {
   const normalized = String(value || "novo")
     .trim()
     .toLocaleLowerCase("pt-BR");
-
   return STATUS_ALIASES[normalized] || "novo";
 }
 
 function normalizeBudget(data) {
   const cents = Number(data.valorOrcamentoCentavos);
-
-  if (Number.isInteger(cents) && cents >= 0) {
-    return cents;
-  }
-
-  const rawValue = data.valor ?? data.budget ?? 0;
-
-  return parseCurrencyToCents(rawValue);
+  if (Number.isInteger(cents) && cents >= 0) return cents;
+  return parseCurrencyToCents(data.valor ?? data.budget ?? 0);
 }
 
-export function normalizeLead(leadDocument) {
+function normalizeDate(value, fallback) {
+  if (value && typeof value.toMillis === "function") {
+    return Number.isFinite(value.toMillis()) ? value : fallback;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  if (value && typeof value.seconds === "number") return value;
+  return fallback;
+}
+
+function dateInMilliseconds(value) {
+  if (value && typeof value.toMillis === "function") return value.toMillis();
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") return Date.parse(value) || 0;
+  if (value && typeof value.seconds === "number") return value.seconds * 1000;
+  return 0;
+}
+
+export function normalizeLead(leadDocument, fallbackDate = Date.now()) {
   const data = leadDocument.data() || {};
-  const rawValue = Number(data.valor || data.budget || 0);
-  const value = Number.isFinite(rawValue) ? rawValue : 0;
+  const date = normalizeDate(
+    data.criadoEm ?? data.createdAt ?? data.timestamp,
+    fallbackDate,
+  );
+  const rawValue = Number(data.valor ?? data.budget ?? 0);
 
   return {
     ...data,
     id: leadDocument.id,
-
-    nome: String(
-      data.nome || data.name || "Sem nome",
-    ).trim(),
-
-    email: String(data.email || "")
-      .trim()
-      .toLowerCase(),
-
-    telefone: String(
-      data.telefone || data.phone || "",
-    ).trim(),
-
-    mensagem: String(
-      data.mensagem || data.message || "",
-    ),
-
-    origem: String(
-      data.origem || "Landing Page",
-    ),
-
-    status: normalizeStatus(
-      data.status || "Novo",
-    ),
-
-    valor: value,
-
-    valorOrcamentoCentavos:
-      normalizeBudget(data),
-
+    nome: String(data.nome || data.name || "Lead sem nome").trim(),
+    email: String(data.email || "Sem e-mail").trim().toLowerCase(),
+    telefone: String(data.telefone || data.phone || "Sem telefone").trim(),
+    mensagem: String(data.mensagem || data.message || ""),
+    origem: String(data.origem || "Não informada"),
+    status: normalizeStatus(data.status || "novo"),
+    valor: Number.isFinite(rawValue) ? rawValue : 0,
+    valorOrcamentoCentavos: normalizeBudget(data),
     moeda: data.moeda || "BRL",
-
     tarefas: Array.isArray(data.tarefas)
-      ? data.tarefas.filter(
-          (task) =>
-            task &&
-            typeof task === "object",
-        )
+      ? data.tarefas.filter((task) => task && typeof task === "object")
       : [],
-
-    // Compatibilidade com registros antigos.
-    criadoEm:
-      data.criadoEm ||
-      data.createdAt ||
-      data.timestamp ||
-      null,
-
-    createdAt:
-      data.criadoEm ||
-      data.createdAt ||
-      data.timestamp ||
-      null,
+    criadoEm: date,
+    createdAt: date,
   };
 }
 
-export function useLeads(clientId) {
+export function useLeads(authenticatedUserId) {
   const [leads, setLeads] = useState([]);
-  const [loading, setLoading] = useState(
-    Boolean(clientId),
-  );
+  const [loading, setLoading] = useState(Boolean(authenticatedUserId));
   const [error, setError] = useState("");
-  const [newLeadToast, setNewLeadToast] =
-    useState(null);
-  const [fromCache, setFromCache] =
-    useState(false);
-  const [retryCount, setRetryCount] =
-    useState(0);
-
+  const [fromCache, setFromCache] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [newLeadToast, setNewLeadToast] = useState(null);
   const initialSnapshotRef = useRef(true);
+  const seenIdsRef = useRef(new Set());
 
   useEffect(() => {
-    if (!newLeadToast) {
-      return undefined;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setNewLeadToast(null);
-    }, 5000);
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
+    if (!newLeadToast) return undefined;
+    const timeout = window.setTimeout(() => setNewLeadToast(null), 5000);
+    return () => window.clearTimeout(timeout);
   }, [newLeadToast]);
 
   useEffect(() => {
     setLeads([]);
-    setNewLeadToast(null);
     setError("");
     setFromCache(false);
+    setNewLeadToast(null);
+    seenIdsRef.current = new Set();
+    initialSnapshotRef.current = true;
 
-    if (!clientId) {
+    if (!authenticatedUserId) {
       setLoading(false);
       return undefined;
     }
 
-    initialSnapshotRef.current = true;
     setLoading(true);
-
-    /*
-     * O filtro clienteId é necessário porque as regras
-     * do Firestore permitem que cada usuário consulte
-     * somente seus próprios leads.
-     */
-    const baseQuery = query(
-      collection(db, "leads"),
-      where("clienteId", "==", clientId),
-    );
-
-    /*
-     * O ouvinte principal usa a ordenação solicitada:
-     * lead mais recente primeiro.
-     */
-    const orderedQuery = query(
-      baseQuery,
-      orderBy("criadoEm", "desc"),
-    );
-
     let active = true;
-    let failed = false;
-    let orderedSnapshot = null;
-    let compatibilitySnapshot = null;
-    let seenIds = new Set();
-
-    function publish() {
-      if (
-        !active ||
-        failed ||
-        !orderedSnapshot ||
-        !compatibilitySnapshot
-      ) {
-        return;
-      }
-
-      const documents = new Map();
-
-      /*
-       * O Firestore não devolve documentos que não tenham
-       * o campo utilizado no orderBy. Por isso, o snapshot
-       * de compatibilidade inclui registros antigos sem
-       * criadoEm.
-       */
-      for (const documentSnapshot of
-        compatibilitySnapshot.docs) {
-        const data =
-          documentSnapshot.data() || {};
-
-        if (data.criadoEm == null) {
-          documents.set(
-            documentSnapshot.id,
-            normalizeLead(documentSnapshot),
-          );
-        }
-      }
-
-      for (const documentSnapshot of
-        orderedSnapshot.docs) {
-        documents.set(
-          documentSnapshot.id,
-          normalizeLead(documentSnapshot),
-        );
-      }
-
-      const nextLeads = [
-        ...documents.values(),
-      ].sort((leadA, leadB) => {
-        const dateDifference =
-          getTimestampInMillis(
-            leadB.criadoEm,
-          ) -
-          getTimestampInMillis(
-            leadA.criadoEm,
-          );
-
-        if (dateDifference !== 0) {
-          return dateDifference;
-        }
-
-        return leadA.id.localeCompare(
-          leadB.id,
-        );
-      });
-
-      const cached =
-        orderedSnapshot.metadata.fromCache ||
-        compatibilitySnapshot.metadata
-          .fromCache;
-
-      if (!initialSnapshotRef.current) {
-        const newestLead = nextLeads.find(
-          (lead) => !seenIds.has(lead.id),
-        );
-
-        if (newestLead) {
-          setNewLeadToast({
-            id: `${newestLead.id}:${Date.now()}`,
-            message:
-              "Novo Lead recebido do site!",
-            leadName: newestLead.nome,
-          });
-        }
-      }
-
-      seenIds = new Set(
-        nextLeads.map((lead) => lead.id),
-      );
-
-      if (!cached) {
-        initialSnapshotRef.current = false;
-      }
-
-      setLeads(nextLeads);
-      setFromCache(cached);
-      setLoading(false);
-      setError("");
-    }
-
-    function handleError(firestoreError) {
-      if (!active) {
-        return;
-      }
-
-      failed = true;
-
-      console.error(
-        "Erro ao escutar atualizações em tempo real:",
-        firestoreError,
-        {
-          projectId:
-            db.app.options.projectId,
-          collection: "leads",
-          clienteId: clientId,
-        },
-      );
-
-      setLeads([]);
-      setLoading(false);
-
-      if (
-        firestoreError.code ===
-        "permission-denied"
-      ) {
-        setError(
-          "Sem permissão para ler leads. Confira as regras e o clienteId dos documentos.",
-        );
-        return;
-      }
-
-      if (
-        firestoreError.code ===
-        "failed-precondition"
-      ) {
-        setError(
-          "A consulta exige o índice clienteId + criadoEm. Publique firestore.indexes.json e aguarde sua criação.",
-        );
-        return;
-      }
-
-      setError(
-        `Falha ao sincronizar leads (${
-          firestoreError.code ||
-          "desconhecido"
-        }). Confira a conexão e tente novamente.`,
-      );
-    }
 
     const unsubscribe = onSnapshot(
-      orderedQuery,
-      {
-        includeMetadataChanges: true,
-      },
+      collection(db, "leads"),
+      { includeMetadataChanges: true },
       (snapshot) => {
-        orderedSnapshot = snapshot;
-        publish();
+        if (!active) return;
+
+        const fallbackDate = Date.now();
+        const nextLeads = snapshot.docs
+          .map((documentSnapshot) =>
+            normalizeLead(documentSnapshot, fallbackDate),
+          )
+          .sort(
+            (leadA, leadB) =>
+              dateInMilliseconds(leadB.criadoEm) -
+                dateInMilliseconds(leadA.criadoEm) ||
+              leadA.id.localeCompare(leadB.id),
+          );
+
+        if (!initialSnapshotRef.current) {
+          const newestLead = nextLeads.find(
+            (lead) => !seenIdsRef.current.has(lead.id),
+          );
+          if (newestLead) {
+            setNewLeadToast({
+              id: `${newestLead.id}:${Date.now()}`,
+              message: "Novo Lead recebido do site!",
+              leadName: newestLead.nome,
+            });
+          }
+        }
+
+        seenIdsRef.current = new Set(nextLeads.map((lead) => lead.id));
+        if (!snapshot.metadata.fromCache) initialSnapshotRef.current = false;
+        setLeads(nextLeads);
+        setFromCache(snapshot.metadata.fromCache);
+        setLoading(false);
+        setError("");
       },
-      handleError,
+      (firestoreError) => {
+        if (!active) return;
+        console.error("Erro ao escutar atualizações em tempo real:", firestoreError, {
+          projectId: db.app.options.projectId,
+          collection: "leads",
+        });
+        setLeads([]);
+        setLoading(false);
+        setError(
+          firestoreError.code === "permission-denied"
+            ? "Sem permissão para escutar toda a coleção leads. Ajuste as regras do Firestore ou use uma consulta compatível com a propriedade dos dados."
+            : `Falha ao sincronizar leads (${firestoreError.code || "desconhecido"}). Confira a conexão e tente novamente.`,
+        );
+      },
     );
 
-    /*
-     * Consulta adicional para registros antigos sem criadoEm.
-     * Ela pode ser removida depois que todos os documentos
-     * antigos forem migrados.
-     */
-    const unsubscribeLegacy = onSnapshot(
-      baseQuery,
-      {
-        includeMetadataChanges: true,
-      },
-      (snapshot) => {
-        compatibilitySnapshot = snapshot;
-        publish();
-      },
-      handleError,
-    );
-
-    /*
-     * Cleanup obrigatório dos dois listeners.
-     */
     return () => {
       active = false;
       unsubscribe();
-      unsubscribeLegacy();
     };
-  }, [clientId, retryCount]);
+  }, [authenticatedUserId, retryCount]);
 
   return {
     leads,
@@ -368,18 +176,8 @@ export function useLeads(clientId) {
     error,
     setError,
     fromCache,
-
-    retry: () => {
-      setRetryCount(
-        (currentCount) =>
-          currentCount + 1,
-      );
-    },
-
+    retry: () => setRetryCount((count) => count + 1),
     newLeadToast,
-
-    dismissNewLeadToast: () => {
-      setNewLeadToast(null);
-    },
+    dismissNewLeadToast: () => setNewLeadToast(null),
   };
 }
