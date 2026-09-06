@@ -26,6 +26,7 @@ export async function POST(request: Request) {
     ref = await getAdminDb().collection("leads").add({
       clienteId, nome, email, telefone, mensagem, origem: "Landing Page", status: "novo_lead",
       valorOrcamentoCentavos: 0, moeda: "BRL", tarefas: [],
+      criadoEm: FieldValue.serverTimestamp(),
       createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
     });
   } catch { return Response.json({ error: "Não foi possível salvar o lead." }, { status: 500 }); }
